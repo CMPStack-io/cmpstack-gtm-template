@@ -1,0 +1,5 @@
+homepage: "https://cmpstack.io"
+documentation: "https://cmpstack.io/docs/install/gtm"
+versions:
+  - sha: 728ed86669fe0a5b3f82987a05cd6b3a589bc511
+    changeNotes: "First release: Consent Mode v2 denied by default, and a returning visitor's decision applied at Consent Initialization"
