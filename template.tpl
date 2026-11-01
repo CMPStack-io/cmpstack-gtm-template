@@ -19,7 +19,7 @@ ___INFO___
     "displayName": "CMPStack",
     "thumbnail": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAABDElEQVR42u3bURKCMAxF0SzFTbn/X3ehC3AQaknea3M746e0OQiWkEQMjtfz8Xb+xN3DPeA0kNUDn4LYLfghhF2Dv4Swe/A/EboEf4jQGqBb8F8IAADQGGD0SyuMIQQAAPgfwOl6BgAAAAAAAAAA8gEcEWbWE4pJXYIHYAbAAeGO+QFwWIRy3nBajGI+ABwXVTkPAM6Lqzh+rLDIzOMCsMJPNfPSAsD9bp19YwXA+T+7Ym8RrtvWqo0VAI4PL5UPVwC4JTCqH61Ly2POglNklwBwSWSqcosAOKSzlel1WY3gbHGTtFZwFwB5pajF2QdAXCusfLts0TMgP/t0jNA0RdscjZO0ztI83bd9/gMoNlQ7XZ3GwQAAAABJRU5ErkJggg=="
   },
-  "description": "Loads the CMPStack consent banner and sets Google Consent Mode v2 signals denied-first, before any other tag fires. Fire this on Consent Initialization - All Pages.",
+  "description": "Loads the CMPStack consent banner and sets Google Consent Mode v2 signals denied-first, before any other tag fires, with optional defaults per region. Fire this on Consent Initialization - All Pages.",
   "containerContexts": ["WEB"]
 }
 
@@ -48,6 +48,79 @@ ___TEMPLATE_PARAMETERS___
     "simpleValueType": true,
     "defaultValue": "https://api.cmpstack.io",
     "help": "Leave as-is unless you are on a dedicated instance."
+  },
+  {
+    "type": "PARAM_TABLE",
+    "name": "regionalDefaults",
+    "displayName": "Regional defaults",
+    "help": "Optional. Every region not listed here starts with all four signals denied. Add a row to start a region differently, for example granted in a country where your banner's Targeting is set to No banner. The visitor's choice replaces these defaults as soon as they make one.",
+    "paramTableColumns": [
+      {
+        "param": {
+          "type": "TEXT",
+          "name": "region",
+          "displayName": "Regions (ISO 3166-2, comma separated, e.g. US, US-CA, CA)",
+          "simpleValueType": true,
+          "valueValidators": [
+            {"type": "NON_EMPTY"},
+            {
+              "type": "REGEX",
+              "args": ["^\\s*[A-Za-z]{2}(-[A-Za-z0-9]{1,3})?(\\s*,\\s*[A-Za-z]{2}(-[A-Za-z0-9]{1,3})?)*\\s*$"],
+              "errorMessage": "Use ISO 3166-2 codes separated by commas, such as US, US-CA or GB."
+            }
+          ]
+        },
+        "isUnique": true
+      },
+      {
+        "param": {
+          "type": "SELECT",
+          "name": "ad_storage",
+          "displayName": "ad_storage",
+          "macrosInSelect": false,
+          "selectItems": [{"value": "denied", "displayValue": "Denied"}, {"value": "granted", "displayValue": "Granted"}],
+          "simpleValueType": true,
+          "defaultValue": "denied"
+        },
+        "isUnique": false
+      },
+      {
+        "param": {
+          "type": "SELECT",
+          "name": "analytics_storage",
+          "displayName": "analytics_storage",
+          "macrosInSelect": false,
+          "selectItems": [{"value": "denied", "displayValue": "Denied"}, {"value": "granted", "displayValue": "Granted"}],
+          "simpleValueType": true,
+          "defaultValue": "denied"
+        },
+        "isUnique": false
+      },
+      {
+        "param": {
+          "type": "SELECT",
+          "name": "ad_user_data",
+          "displayName": "ad_user_data",
+          "macrosInSelect": false,
+          "selectItems": [{"value": "denied", "displayValue": "Denied"}, {"value": "granted", "displayValue": "Granted"}],
+          "simpleValueType": true,
+          "defaultValue": "denied"
+        },
+        "isUnique": false
+      },
+      {
+        "param": {
+          "type": "SELECT",
+          "name": "ad_personalization",
+          "displayName": "ad_personalization",
+          "macrosInSelect": false,
+          "selectItems": [{"value": "denied", "displayValue": "Denied"}, {"value": "granted", "displayValue": "Granted"}],
+          "simpleValueType": true,
+          "defaultValue": "denied"
+        },
+        "isUnique": false
+      }
+    ]
   }
 ]
 
@@ -64,6 +137,7 @@ ___SANDBOXED_JS_FOR_WEB_TEMPLATE___
 // than by writing a <script> element.
 
 const injectScript = require('injectScript');
+const gtagSet = require('gtagSet');
 const setDefaultConsentState = require('setDefaultConsentState');
 const updateConsentState = require('updateConsentState');
 const getCookieValues = require('getCookieValues');
@@ -84,6 +158,12 @@ const encodeUriComponent = require('encodeUriComponent');
 // for tags outside it. A tag in this container that declares a consent requirement
 // checks THIS state, so without it GTM would let those tags fire while the banner
 // still believed everything was denied.
+//
+// CMPStack's Google tag Developer ID comes first, so Google attributes this
+// container's consent signals to us from the very first command. The tag's script
+// sets it too (src/gcm.ts), but only once injectScript has fetched it.
+gtagSet({'developer_id.dZmZiYj': true});
+
 setDefaultConsentState({
   ad_storage: 'denied',
   ad_user_data: 'denied',
@@ -91,6 +171,35 @@ setDefaultConsentState({
   analytics_storage: 'denied',
   wait_for_update: 500
 });
+
+// Regional defaults, from the tag's "Regional defaults" table.
+//
+// A default that names a region wins over the one above for visitors in it, so a
+// row only ever changes where the site owner listed it; everywhere else stays
+// denied-first. A row whose regions are blank is skipped rather than sent: without
+// `region` it would be a second global default, and could grant what the one above
+// denied for every visitor.
+const signal = function (v) { return v === 'granted' ? 'granted' : 'denied'; };
+const rows = getType(data.regionalDefaults) === 'array' ? data.regionalDefaults : [];
+for (let i = 0; i < rows.length; i++) {
+  const row = rows[i];
+  const parts = (row.region || '').split(',');
+  const regions = [];
+  for (let j = 0; j < parts.length; j++) {
+    const code = parts[j].trim().toUpperCase();
+    if (code) regions.push(code);
+  }
+  if (regions.length) {
+    setDefaultConsentState({
+      ad_storage: signal(row.ad_storage),
+      ad_user_data: signal(row.ad_user_data),
+      ad_personalization: signal(row.ad_personalization),
+      analytics_storage: signal(row.analytics_storage),
+      region: regions,
+      wait_for_update: 500
+    });
+  }
+}
 
 // A returning visitor's decision, applied here and now.
 //
@@ -188,6 +297,16 @@ ___WEB_PERMISSIONS___
   },
   {
     "instance": {
+      "key": {"publicId": "write_data_layer", "versionId": "1"},
+      "param": [
+        {"key": "keyPatterns", "value": {"type": 2, "listItem": [{"type": 1, "string": "developer_id.dZmZiYj"}]}}
+      ]
+    },
+    "clientAnnotations": {"isEditedByUser": true},
+    "isRequired": true
+  },
+  {
+    "instance": {
       "key": {"publicId": "get_cookies", "versionId": "1"},
       "param": [
         {"key": "cookieAccess", "value": {"type": 1, "string": "specific"}},
@@ -216,6 +335,40 @@ scenarios:
     assertThat(defaults.ad_personalization).isEqualTo('denied');
     assertThat(defaults.analytics_storage).isEqualTo('denied');
     assertApi('gtmOnSuccess').wasCalled();
+
+- name: sets the CMPStack developer id
+  code: |
+    const mockData = {siteId: '00000000-0000-4000-8000-000000000000'};
+    mock('setDefaultConsentState', () => {});
+    mock('injectScript', (url, onSuccess) => { onSuccess(); });
+
+    runCode(mockData);
+
+    assertApi('gtagSet').wasCalledWith({'developer_id.dZmZiYj': true});
+
+- name: applies a regional default only to the regions it names
+  code: |
+    const mockData = {
+      siteId: '00000000-0000-4000-8000-000000000000',
+      regionalDefaults: [
+        {region: 'us, US-CA ', ad_storage: 'granted', analytics_storage: 'granted', ad_user_data: 'denied', ad_personalization: 'denied'},
+        {region: ' ', ad_storage: 'granted', analytics_storage: 'granted', ad_user_data: 'granted', ad_personalization: 'granted'}
+      ]
+    };
+    const calls = [];
+    mock('setDefaultConsentState', (state) => { calls.push(state); });
+    mock('injectScript', (url, onSuccess) => { onSuccess(); });
+
+    runCode(mockData);
+
+    assertThat(calls.length).isEqualTo(2);
+    assertThat(calls[0].ad_storage).isEqualTo('denied');
+    assertThat(calls[0].region).isUndefined();
+    assertThat(calls[1].region).isEqualTo(['US', 'US-CA']);
+    assertThat(calls[1].ad_storage).isEqualTo('granted');
+    assertThat(calls[1].analytics_storage).isEqualTo('granted');
+    assertThat(calls[1].ad_user_data).isEqualTo('denied');
+    assertThat(calls[1].wait_for_update).isEqualTo(500);
 
 - name: passes the site id to the CDN
   code: |
@@ -290,5 +443,6 @@ Submission checklist (the gallery is a review process, not an upload):
   2. Add `metadata.yaml` with the gallery listing details.
   3. Submit at tagmanager.google.com/gallery — Google reviews the permissions
      requested against what the code actually does, which is why the permission
-     block above is narrow: one CDN host, four consent types written, and one
-     cookie (our own consent record) read.
+     block above is narrow: one CDN host, four consent types written, one data
+     layer key (our Google tag Developer ID) written, and one cookie (our own
+     consent record) read.
